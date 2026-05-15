@@ -1,0 +1,37 @@
+# Comparison reports with confidential project names
+sbom_comparison_report*.md
+SBOM_FORMAT_COMPARISON.md
+
+# Confidential test data
+test_repos/tmc-mobile-bifrost/
+customer_report/
+scan_reports/
+old_reports/
+out/
+
+# Other analysis files
+Competitors/
+example_target_repos/
+
+# Claude workspace - track commands but not session/memory data
+.claude/settings*
+.claude/projects/
+.claude/*.json
+.claude/*.jsonl
+
+# rust build artifacts
+target/
+dist/
+
+# git worktrees
+.worktrees/
+.claude/worktrees/
+
+# Internal documents / accidentally committed files
+CEO_Presentation_*.md
+CODE_REVIEW_*.md
+Newsletter_*.md
+*.log
+test-baseline.txt
+test-final.txt
+benchmark/juliet/

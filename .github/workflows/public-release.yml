@@ -1,0 +1,349 @@
+name: Public Release
+
+# Creates a pub_release/vX.Y.Z branch from master with all vulnerability
+# scanning code removed. The branch is safe to publish publicly.
+#
+# Triggers:
+#   - Manual dispatch (workflow_dispatch): specify version or leave empty to
+#     read from Cargo.toml automatically.
+#   - Pushing a version tag (v*.*.*): version is derived from the tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.0.7). Leave empty to read from Cargo.toml.'
+        required: false
+        default: ''
+        type: string
+      create_github_release:
+        description: 'Create a GitHub Release from the public branch'
+        required: false
+        default: false
+        type: boolean
+      region:
+        description: 'Target region: "global" (default) or "cn". CN build enables cn-release feature (adds vulnerability assessment service info to --help).'
+        required: false
+        default: 'global'
+        type: choice
+        options:
+          - global
+          - cn
+
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-public-release-branch:
+    name: Create Public Release Branch
+    runs-on:
+      group: Default
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout source
+      #    - Tag push: check out the exact tagged commit (reproducible release)
+      #    - Manual dispatch: check out the ref the workflow was dispatched from
+      # -----------------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || github.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GIT_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 2. Determine version
+      # -----------------------------------------------------------------------
+      - name: Determine version
+        id: version
+        # Route all user-controlled inputs through environment variables to
+        # prevent expression injection into the shell script.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_REGION: ${{ inputs.region }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" && "${REF_TYPE}" == "tag" ]]; then
+            # Strip leading "v" from tag name (GITHUB_REF_NAME is safe — set by runner)
+            VERSION="${GITHUB_REF_NAME#v}"
+            # Validate tag-derived version is a clean semver (rejects rc/alpha/pre-release suffixes)
+            if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: tag '${GITHUB_REF_NAME}' does not resolve to a valid semver (X.Y.Z)"
+              exit 1
+            fi
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            # Validate user-supplied version is a safe semver string before using it
+            if ! [[ "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: version input '${INPUT_VERSION}' is not a valid semver (X.Y.Z)"
+              exit 1
+            fi
+            VERSION="${INPUT_VERSION}"
+          else
+            # Read from Cargo.toml
+            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            # Validate Cargo.toml-derived version is a clean semver (X.Y.Z)
+            if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: Cargo.toml version '${VERSION}' is not a valid semver (X.Y.Z)"
+              exit 1
+            fi
+          fi
+
+          # CN release gets its own branch so it doesn't overwrite the global branch
+          REGION="${INPUT_REGION:-global}"
+          if [[ "${REGION}" == "cn" ]]; then
+            BRANCH="pub_release/v${VERSION}-cn"
+          else
+            BRANCH="pub_release/v${VERSION}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+          echo "Target branch:    ${BRANCH}"
+          echo "Region:           ${REGION}"
+
+      # -----------------------------------------------------------------------
+      # 3. Validate version matches Cargo.toml
+      # -----------------------------------------------------------------------
+      - name: Validate version matches Cargo.toml
+        env:
+          INPUT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [[ "$CARGO_VERSION" != "${INPUT_VERSION}" ]]; then
+            echo "ERROR: Requested version ${INPUT_VERSION} does not match Cargo.toml version ${CARGO_VERSION}"
+            exit 1
+          fi
+          echo "Version check passed: ${INPUT_VERSION}"
+
+      # -----------------------------------------------------------------------
+      # 4. Create and checkout the public release branch
+      # -----------------------------------------------------------------------
+      - name: Create public release branch
+        run: |
+          BRANCH="${{ steps.version.outputs.branch }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # If branch already exists on remote (e.g. from a failed prior run),
+          # delete it so this run starts clean.
+          if git ls-remote --exit-code --heads origin "${BRANCH}" &>/dev/null; then
+            echo "Branch '${BRANCH}' already exists on origin — deleting for clean re-run."
+            git push origin --delete "${BRANCH}"
+          fi
+
+          git checkout -b "$BRANCH"
+          echo "Created branch: $BRANCH"
+
+      # -----------------------------------------------------------------------
+      # 5. Run the vulnerability stripping script
+      # -----------------------------------------------------------------------
+      - name: Strip vulnerability code
+        run: |
+          chmod +x scripts/strip_vulnerability.sh
+          bash scripts/strip_vulnerability.sh "${{ steps.version.outputs.region }}"
+
+      # -----------------------------------------------------------------------
+      # 6. Remove the stripping script itself from the public branch
+      #    (it references internal implementation details)
+      # -----------------------------------------------------------------------
+      - name: Remove strip_vulnerability.sh from public branch
+        run: |
+          rm -f scripts/strip_vulnerability.sh
+          # Remove scripts dir if empty
+          rmdir scripts 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 7. Remove Claude Code commands from public branch
+      #    (.claude/ contains internal team tooling — not for public release)
+      # -----------------------------------------------------------------------
+      - name: Remove .claude directory from public branch
+        run: |
+          rm -rf .claude/
+          echo "Removed .claude/ from public branch"
+
+      # -----------------------------------------------------------------------
+      # 8. Install Rust toolchain and verify the stripped source compiles
+      # -----------------------------------------------------------------------
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Verify stripped source compiles
+        run: |
+          echo "Building public release (release profile)..."
+          if [[ "${{ steps.version.outputs.region }}" == "cn" ]]; then
+            echo "CN release: building with --features cn-release"
+            cargo build --release --features cn-release
+          else
+            cargo build --release
+          fi
+          echo "Build succeeded - no vulnerability code references remain."
+
+      # -----------------------------------------------------------------------
+      # 9. Confirm no vulnerability references remain in src/, tests/, or docs
+      # -----------------------------------------------------------------------
+      - name: "Audit: confirm no vulnerability references in src/, tests/, or docs"
+        run: |
+          # Check Rust sources for known vulnerability API identifiers
+          RUST_ID_HITS=$(grep -r --include="*.rs" \
+            -e "check_vulnerabilities" \
+            -e "OsvProvider" \
+            -e "VulnerabilityOutputMode" \
+            -e "query_vulnerabilities_batch" \
+            -e "clear_vulnerability_cache" \
+            -e "SbomMode" \
+            -e "VulnerableOnly" \
+            -e "pub mod vulnerability" \
+            -e "use.*vulnerability::" \
+            src/ tests/ 2>/dev/null || true)
+          if [[ -n "$RUST_ID_HITS" ]]; then
+            echo "ERROR: Vulnerability API identifiers still found in Rust source tree:"
+            echo "$RUST_ID_HITS"
+            exit 1
+          fi
+
+          # Broad literal check on Rust sources (catches residual comments/strings)
+          # Use -w for portable whole-word matching instead of \b (GNU-only extension)
+          # CN builds intentionally keep src/cli.rs's cfg_attr block which contains
+          # "vulnerability assessment service" — exclude it from the broad check.
+          REGION="${{ steps.version.outputs.region }}"
+          BROAD_EXCLUDE=""
+          if [[ "${REGION}" == "cn" ]]; then
+            BROAD_EXCLUDE="--exclude=cli.rs"
+          fi
+          RUST_BROAD_HITS=$(grep -ri \
+            -e "vulnerabil" \
+            --include="*.rs" \
+            ${BROAD_EXCLUDE} \
+            src/ tests/ 2>/dev/null || \
+          grep -riw \
+            -e "osv" \
+            --include="*.rs" \
+            ${BROAD_EXCLUDE} \
+            src/ tests/ 2>/dev/null || true)
+          if [[ -n "$RUST_BROAD_HITS" ]]; then
+            echo "ERROR: Residual vulnerability text found in Rust source tree:"
+            echo "$RUST_BROAD_HITS"
+            exit 1
+          fi
+
+          # Check all top-level *.md files and docs/**/*.md (including i18n/) for
+          # vulnerability mentions. Strip script now cleans i18n files too.
+          # Exclude README*.md: they intentionally retain the VicOne xZETA campaign
+          # section which mentions "vulnerability" as product marketing copy — this
+          # is not radeis_sc2sbom's own vulnerability scanning feature.
+          # Use -w for portable whole-word matching of 'osv' instead of \b (GNU-only)
+          DOC_HITS=$(grep -Rni \
+            -e "vulnerabilit" \
+            -e "check.vulnerabilities" \
+            -e "CVE-[0-9]" \
+            --include="*.md" \
+            --exclude="README*.md" \
+            docs/ CHANGELOG.md BINARY_README.md 2>/dev/null || true)
+          DOC_HITS+=$(grep -Rniw \
+            -e "osv" \
+            --include="*.md" \
+            --exclude="README*.md" \
+            docs/ CHANGELOG.md BINARY_README.md 2>/dev/null || true)
+          if [[ -n "$DOC_HITS" ]]; then
+            echo "ERROR: Vulnerability references still found in docs:"
+            echo "$DOC_HITS"
+            exit 1
+          fi
+
+          echo "Audit passed: no vulnerability references found in src/, tests/, top-level *.md, or docs/"
+
+      # -----------------------------------------------------------------------
+      # 10. Commit stripped source to public branch
+      # -----------------------------------------------------------------------
+      - name: Commit public release source
+        run: |
+          git add -A
+          git commit -m "chore: public release v${{ steps.version.outputs.version }} - remove vulnerability module
+
+          Automated public release branch created by public-release workflow.
+          All vulnerability scanning code (OSV API integration) has been removed.
+          This branch is safe for public distribution."
+
+      # -----------------------------------------------------------------------
+      # 11. Push public release branch
+      # -----------------------------------------------------------------------
+      - name: Push public release branch
+        run: |
+          git push origin "${{ steps.version.outputs.branch }}"
+          echo "Pushed branch: ${{ steps.version.outputs.branch }}"
+
+      # -----------------------------------------------------------------------
+      # 12. (Optional) Create GitHub Release
+      # -----------------------------------------------------------------------
+      - name: Prepare release binary
+        if: ${{ inputs.create_github_release == true || github.event_name == 'push' }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cp target/release/radeis_sc2sbom "radeis_sc2sbom-v${VERSION}-linux-x86_64"
+          sha256sum "radeis_sc2sbom-v${VERSION}-linux-x86_64" > "radeis_sc2sbom-v${VERSION}-linux-x86_64.sha256"
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_github_release == true || github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="${{ steps.version.outputs.branch }}"
+
+          # If release already exists (e.g. from a failed prior run), delete it first
+          if gh release view "pub/v${VERSION}" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release 'pub/v${VERSION}' already exists — deleting for clean re-run."
+            gh release delete "pub/v${VERSION}" --repo "${{ github.repository }}" --yes --cleanup-tag
+          fi
+
+          gh release create "pub/v${VERSION}" \
+            --repo "${{ github.repository }}" \
+            --title "Public Release v${VERSION}" \
+            --target "${BRANCH}" \
+            --notes "## SBOM Scanner v${VERSION} (Public Release)
+
+          This is the public release build. It generates SBOM files in SPDX 2.3
+          and CycloneDX 1.5 formats from your source code directory.
+
+          ### Download
+          Pick the binary for your platform from the assets below.
+
+          ### Usage
+          \`\`\`bash
+          ./radeis_sc2sbom --path /path/to/your/project --format all
+          \`\`\`" \
+            "radeis_sc2sbom-v${VERSION}-linux-x86_64" \
+            "radeis_sc2sbom-v${VERSION}-linux-x86_64.sha256"
+
+      # -----------------------------------------------------------------------
+      # Summary
+      # -----------------------------------------------------------------------
+      - name: Summary
+        run: |
+          echo "### Public Release Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | v${{ steps.version.outputs.version }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Region | ${{ steps.version.outputs.region }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ steps.version.outputs.branch }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Vulnerability code | Removed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build | Passing |" >> "$GITHUB_STEP_SUMMARY"

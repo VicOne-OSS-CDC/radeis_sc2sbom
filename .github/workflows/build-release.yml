@@ -1,0 +1,727 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from (leave empty to use current branch)'
+        required: false
+        default: ''
+        type: string
+      platforms:
+        description: 'Platforms to build (macos-arm, macos-intel, linux, windows or "all")'
+        required: true
+        default: 'all'
+        type: string
+      create_release:
+        description: 'Create GitHub release'
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: 'Mark as pre-release'
+        required: true
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.platform_name }})
+    # NOTE: Uses Linux runner with osxcross for cross-compilation
+    # This is more cost-effective than using macOS runners
+    runs-on:
+      group: Default
+    strategy:
+      matrix:
+        include:
+          - platform_id: macos-arm
+            platform_name: ARM64
+            target: aarch64-apple-darwin
+            binary_name: radeis_sc2sbom-macos-arm64
+          - platform_id: macos-intel
+            platform_name: Intel x86_64
+            target: x86_64-apple-darwin
+            binary_name: radeis_sc2sbom-macos-x86_64
+
+    steps:
+      - name: Check if build should run
+        id: should_build
+        run: |
+          SHOULD_BUILD="false"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            SHOULD_BUILD="true"
+          elif [ "${{ inputs.platforms }}" = "all" ]; then
+            SHOULD_BUILD="true"
+          elif echo "${{ inputs.platforms }}" | grep -q "${{ matrix.platform_id }}"; then
+            SHOULD_BUILD="true"
+          fi
+          echo "should_build=$SHOULD_BUILD" >> $GITHUB_OUTPUT
+          echo "Platform: ${{ matrix.platform_id }}, Should build: $SHOULD_BUILD"
+
+      - name: Checkout code
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
+          submodules: 'recursive'
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Validate Version Consistency
+        if: steps.should_build.outputs.should_build == 'true' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          echo "Tag version: $TAG_VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ ERROR: Version mismatch detected!"
+            echo "   Git tag: v$TAG_VERSION"
+            echo "   Cargo.toml: $CARGO_VERSION"
+            echo ""
+            echo "Please update Cargo.toml version to match the tag before releasing."
+            echo "Run: sed -i 's/^version = \".*\"/version = \"$TAG_VERSION\"/' Cargo.toml"
+            exit 1
+          fi
+
+          echo "✅ Version validation passed: $TAG_VERSION"
+
+      - name: Setup OSXCross for macOS cross-compilation
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: mbround18/setup-osxcross@v1
+        with:
+          osx-version: "12.3"
+
+      - name: Setup Rust toolchain
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add target
+        if: steps.should_build.outputs.should_build == 'true'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Verify osxcross setup and find linker paths
+        if: steps.should_build.outputs.should_build == 'true'
+        run: |
+          echo "=== Environment ==="
+          echo "PATH: $PATH"
+          echo "HOME: $HOME"
+          echo "PWD: $PWD"
+
+          echo ""
+          echo "=== Looking for darwin binaries in PATH ==="
+          which -a aarch64-apple-darwin21.4-clang 2>/dev/null || echo "specific aarch64 clang not in PATH"
+          which -a x86_64-apple-darwin21.4-clang 2>/dev/null || echo "specific x86_64 clang not in PATH"
+
+          echo ""
+          echo "=== Searching common locations ==="
+          for dir in /usr/local/osxcross /opt/osxcross "$HOME/osxcross" "$HOME/.osxcross"; do
+            if [ -d "$dir" ]; then
+              echo "Found directory: $dir"
+              find "$dir" -name "*darwin*clang" -type f 2>/dev/null | head -5 || true
+            fi
+          done
+
+          echo ""
+          echo "=== Checking if binaries are in PATH ==="
+          for cmd in $(echo $PATH | tr ':' '\n'); do
+            if ls "$cmd"/*darwin* 2>/dev/null | head -1 > /dev/null; then
+              echo "Darwin binaries found in: $cmd"
+              ls -la "$cmd"/*darwin* 2>/dev/null | head -10
+              break
+            fi
+          done
+
+      - name: Configure Cargo for cross-compilation
+        if: steps.should_build.outputs.should_build == 'true'
+        run: |
+          # Find osxcross binaries by searching PATH directories
+          # The setup-osxcross action adds them to PATH but doesn't set OSXCROSS_TARGET_DIR
+          echo "Searching for osxcross binaries in PATH..."
+          OSXCROSS_BIN=""
+
+          for dir in $(echo $PATH | tr ':' '\n'); do
+            # Check if this directory contains apple-darwin cross-compilation tools
+            if [ -d "$dir" ] && ls "$dir"/*apple-darwin*-clang 2>/dev/null | head -1 > /dev/null; then
+              OSXCROSS_BIN="$dir"
+              echo "✓ Found osxcross bin directory in PATH: $dir"
+              break
+            fi
+          done
+
+          if [ -z "$OSXCROSS_BIN" ]; then
+            echo "ERROR: Could not find osxcross bin directory with darwin binaries in PATH"
+            echo "PATH directories searched:"
+            echo "$PATH" | tr ':' '\n' | while read dir; do
+              echo "  - $dir"
+              if [ -d "$dir" ]; then
+                ls -la "$dir" 2>/dev/null | grep -i darwin | head -5 || true
+              fi
+            done
+            exit 1
+          fi
+
+          # Find the actual linker names with version suffix
+          # osxcross uses format: {arch}-apple-darwin{version}-clang
+          # Note: These may be symlinks, so don't use -type f
+          AARCH64_CLANG=$(find "$OSXCROSS_BIN" -name "aarch64-apple-darwin*-clang" 2>/dev/null | grep -v '\+\+$' | head -1 || echo "")
+          X86_64_CLANG=$(find "$OSXCROSS_BIN" -name "x86_64-apple-darwin*-clang" 2>/dev/null | grep -v '\+\+$' | head -1 || echo "")
+          AARCH64_AR=$(find "$OSXCROSS_BIN" -name "aarch64-apple-darwin*-ar" 2>/dev/null | head -1 || echo "")
+          X86_64_AR=$(find "$OSXCROSS_BIN" -name "x86_64-apple-darwin*-ar" 2>/dev/null | head -1 || echo "")
+
+          echo "Found linkers:"
+          echo "  aarch64 clang: $AARCH64_CLANG"
+          echo "  x86_64 clang: $X86_64_CLANG"
+          echo "  aarch64 ar: $AARCH64_AR"
+          echo "  x86_64 ar: $X86_64_AR"
+
+          # Verify we found the linkers for the current target
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && [ -z "$AARCH64_CLANG" ]; then
+            echo "ERROR: Could not find aarch64-apple-darwin-clang in $OSXCROSS_BIN"
+            ls -la "$OSXCROSS_BIN" | grep aarch64 || true
+            exit 1
+          fi
+
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ] && [ -z "$X86_64_CLANG" ]; then
+            echo "ERROR: Could not find x86_64-apple-darwin-clang in $OSXCROSS_BIN"
+            ls -la "$OSXCROSS_BIN" | grep x86_64 || true
+            exit 1
+          fi
+
+          # Extract just the binary names (not full paths)
+          AARCH64_CLANG_NAME=$(basename "$AARCH64_CLANG" 2>/dev/null || echo "")
+          X86_64_CLANG_NAME=$(basename "$X86_64_CLANG" 2>/dev/null || echo "")
+          AARCH64_AR_NAME=$(basename "$AARCH64_AR" 2>/dev/null || echo "")
+          X86_64_AR_NAME=$(basename "$X86_64_AR" 2>/dev/null || echo "")
+
+          mkdir -p .cargo
+          cat << EOF > .cargo/config.toml
+          [target.aarch64-apple-darwin]
+          linker = "$AARCH64_CLANG_NAME"
+          ar = "$AARCH64_AR_NAME"
+
+          [target.x86_64-apple-darwin]
+          linker = "$X86_64_CLANG_NAME"
+          ar = "$X86_64_AR_NAME"
+          EOF
+
+          echo "Cargo config created:"
+          cat .cargo/config.toml
+
+          # Export CC_<target> so cc-rs (used by tree-sitter-c build script) picks up
+          # the OSXCross clang instead of the system gcc for C compilation.
+          # System gcc does not understand -arch or -mmacosx-version-min.
+          echo "CC_aarch64_apple_darwin=$AARCH64_CLANG_NAME" >> $GITHUB_ENV
+          echo "CC_x86_64_apple_darwin=$X86_64_CLANG_NAME" >> $GITHUB_ENV
+
+      - name: Cache cargo registry
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-target-
+
+      - name: Build binary
+        if: steps.should_build.outputs.should_build == 'true'
+        run: |
+          cargo build --release --features internal --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/radeis_sc2sbom ${{ matrix.binary_name }}
+          chmod +x ${{ matrix.binary_name }}
+
+      - name: Upload artifact
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          retention-days: 90
+
+  build-linux:
+    name: Build Linux (${{ matrix.platform_name }})
+    runs-on:
+      group: Default
+    strategy:
+      matrix:
+        include:
+          - platform_id: linux
+            platform_name: Linux x86_64 static (musl)
+            target: x86_64-unknown-linux-musl
+            binary_name: radeis_sc2sbom-linux
+            cross_compile: true
+          - platform_id: windows
+            platform_name: Windows x86_64
+            target: x86_64-pc-windows-gnu
+            binary_name: radeis_sc2sbom-windows.exe
+            cross_compile: true
+
+    steps:
+      - name: Check if build should run
+        id: should_build
+        run: |
+          SHOULD_BUILD="false"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            SHOULD_BUILD="true"
+          elif [ "${{ inputs.platforms }}" = "all" ]; then
+            SHOULD_BUILD="true"
+          elif echo "${{ inputs.platforms }}" | grep -q "${{ matrix.platform_id }}"; then
+            SHOULD_BUILD="true"
+          fi
+          echo "should_build=$SHOULD_BUILD" >> $GITHUB_OUTPUT
+          echo "Platform: ${{ matrix.platform_id }}, Should build: $SHOULD_BUILD"
+
+      - name: Checkout code
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
+          submodules: 'recursive'
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Validate Version Consistency
+        if: steps.should_build.outputs.should_build == 'true' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          echo "Tag version: $TAG_VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ ERROR: Version mismatch detected!"
+            echo "   Git tag: v$TAG_VERSION"
+            echo "   Cargo.toml: $CARGO_VERSION"
+            echo ""
+            echo "Please update Cargo.toml version to match the tag before releasing."
+            echo "Run: sed -i 's/^version = \".*\"/version = \"$TAG_VERSION\"/' Cargo.toml"
+            exit 1
+          fi
+
+          echo "✅ Version validation passed: $TAG_VERSION"
+
+      - name: Setup Rust toolchain
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build toolchains
+        if: steps.should_build.outputs.should_build == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev perl make
+
+          # Install cross-compilation toolchains if needed
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
+              sudo apt-get install -y mingw-w64
+            fi
+            if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+              sudo apt-get install -y musl-tools
+            fi
+          fi
+
+      - name: Add target
+        if: steps.should_build.outputs.should_build == 'true'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-target-
+
+      - name: Build binary
+        if: steps.should_build.outputs.should_build == 'true'
+        # Note: .cargo/config.toml now defaults the musl linker to `musl-gcc`,
+        # which matches what Ubuntu's `musl-tools` package installs — no
+        # CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER override is needed here.
+        run: |
+          cargo build --release --features internal --target ${{ matrix.target }}
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
+            cp target/${{ matrix.target }}/release/radeis_sc2sbom.exe ${{ matrix.binary_name }}
+          else
+            cp target/${{ matrix.target }}/release/radeis_sc2sbom ${{ matrix.binary_name }}
+            chmod +x ${{ matrix.binary_name }}
+          fi
+
+      - name: Upload artifact
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          retention-days: 90
+
+  build-public:
+    name: Build and Test Public (no-feature)
+    runs-on:
+      group: Default
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
+          token: ${{ secrets.GIT_TOKEN }}
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build public binary
+        run: cargo build --release
+      - name: Run public tests
+        run: cargo test
+
+  validate-sbom:
+    name: Validate SBOM Output (SPDX + CycloneDX)
+    runs-on:
+      group: Default
+    # NOTE: Runner is always Linux (Default group). validate-sbom only needs build-linux
+    # since macOS binaries are cross-compiled artifacts and cannot execute on this runner.
+    needs: [build-linux]
+    if: needs.build-linux.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: radeis_sc2sbom-linux
+          path: ./bin
+
+      - name: Make binary executable
+        run: chmod +x ./bin/radeis_sc2sbom-linux
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install SPDX validator
+        run: pip install spdx-tools
+
+      - name: Install CycloneDX CLI
+        run: |
+          curl -sL https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.30.0/cyclonedx-linux-x64 \
+            -o /usr/local/bin/cyclonedx
+          chmod +x /usr/local/bin/cyclonedx
+
+      - name: Clone rclcpp example repo
+        run: |
+          mkdir -p example_target_repos
+          git clone --depth 1 https://github.com/ros2/rclcpp example_target_repos/rclcpp
+
+      - name: Generate SBOM from example repo (rclcpp)
+        run: |
+          ./bin/radeis_sc2sbom-linux \
+            --path example_target_repos/rclcpp \
+            --output ./validation-out \
+            --format all
+
+      - name: Validate SPDX JSON with pyspdxtools
+        run: pyspdxtools -i ./validation-out/rclcpp_spdx.json
+
+      - name: Validate CycloneDX JSON (schema)
+        run: cyclonedx validate --input-format json --input-version v1_5 --input-file ./validation-out/rclcpp_cyclonedx.json
+
+      - name: Validate CycloneDX JSON (business logic checks)
+        run: |
+          python -c "
+          import json
+          from collections import Counter
+          d = json.load(open('./validation-out/rclcpp_cyclonedx.json'))
+          root_ref = d['metadata']['component']['bom-ref']
+          dep_refs = [dep['ref'] for dep in d['dependencies']]
+          assert root_ref in dep_refs, f'root bom-ref {root_ref!r} missing from dependencies'
+          counts = Counter(c['bom-ref'] for c in d['components'])
+          dupes = [k for k, v in counts.items() if v > 1]
+          assert not dupes, f'duplicate bom-refs: {dupes}'
+          for dep in d['dependencies']:
+              seen = Counter(dep['dependsOn'])
+              dup_refs = [k for k, v in seen.items() if v > 1]
+              assert not dup_refs, f'duplicate dependsOn in {dep[\"ref\"]}: {dup_refs}'
+          print('CycloneDX business logic checks passed')
+          "
+
+  release:
+    name: Create Release
+    runs-on:
+      group: Default
+    needs: [build-macos, build-linux, validate-sbom, build-public]
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
+          submodules: 'recursive'
+          token: ${{ secrets.GIT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Checkout xnexus-md2pdf-tool
+        uses: actions/checkout@v4
+        with:
+          repository: VicOne-RD/xnexus-md2pdf-tool
+          token: ${{ secrets.GIT_TOKEN }}
+          path: xnexus-md2pdf-tool
+
+      - name: Setup Python for PDF generation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PDF generation dependencies
+        run: |
+          cd xnexus-md2pdf-tool
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          deactivate
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+
+          # Copy binaries
+          find artifacts -type f -name "radeis_sc2sbom-*" -exec cp {} release/ \;
+
+          # Copy BINARY_README.md as README.md (English)
+          cp BINARY_README.md release/README.md
+
+          # Copy locale BINARY_READMEs
+          cp docs/i18n/BINARY_README.zh-Hans.md release/README_zh-Hans.md
+          cp docs/i18n/BINARY_README.zh-Hant.md release/README_zh-Hant.md
+          cp docs/i18n/BINARY_README.ja.md release/README_ja.md
+
+          # Generate master checksums (all platform binaries)
+          cd release
+          sha256sum radeis_sc2sbom-* > checksums.txt
+          cd ..
+
+          # List files for verification
+          ls -lh release/
+
+      - name: Generate BINARY_README PDF
+        run: |
+          # Extract version from Cargo.toml or tag
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v(.*)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          fi
+
+          echo "Generating PDF for version: $VERSION"
+
+          # Run PDF generation
+          cd xnexus-md2pdf-tool
+          source .venv/bin/activate
+
+          python src/build_all.py \
+            --md ../BINARY_README.md \
+            --outdir ../release \
+            --out-pdf "../release/README.pdf" \
+            --title "radeis_sc2sbom v${VERSION}" \
+            --generated "Generated: $(date '+%B %Y')" \
+            --product-name "radeis_sc2sbom" \
+            --no-dashboard \
+            --no-inline-charts \
+            --log-level INFO
+
+          deactivate
+          cd ..
+
+          # Verify PDF was created
+          if [ -f "release/README.pdf" ]; then
+            echo "✅ PDF generated successfully: $(du -h release/README.pdf | cut -f1)"
+            ls -lh release/README.pdf
+          else
+            echo "⚠️  Warning: PDF generation may have failed"
+            ls -lh release/
+          fi
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v(.*)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Package per-platform zips
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          WORKSPACE="${GITHUB_WORKSPACE}"
+
+          # platform:src_binary:zip_binary
+          PLATFORMS="linux:radeis_sc2sbom-linux:radeis_sc2sbom
+          macos-arm64:radeis_sc2sbom-macos-arm64:radeis_sc2sbom
+          macos-x86_64:radeis_sc2sbom-macos-x86_64:radeis_sc2sbom
+          windows:radeis_sc2sbom-windows.exe:radeis_sc2sbom.exe"
+
+          echo "$PLATFORMS" | while IFS=: read -r PLATFORM SRC_NAME BIN_NAME; do
+            PLATFORM=$(echo "$PLATFORM" | xargs)  # trim whitespace
+            [ -z "$PLATFORM" ] && continue
+
+            ZIP_NAME="radeis_sc2sbom_${VERSION}_${PLATFORM}.zip"
+            STAGE_DIR="${WORKSPACE}/zips/stage_${PLATFORM}"
+
+            mkdir -p "$STAGE_DIR"
+
+            # Copy binary with clean name
+            cp "${WORKSPACE}/release/${SRC_NAME}" "${STAGE_DIR}/${BIN_NAME}"
+
+            # Set executable bit for non-Windows binaries
+            if [ "$PLATFORM" != "windows" ]; then
+              chmod +x "${STAGE_DIR}/${BIN_NAME}"
+            fi
+
+            # Include English README, PDF, locale READMEs, and master checksums
+            cp "${WORKSPACE}/release/README.md" "${STAGE_DIR}/README.md"
+            cp "${WORKSPACE}/release/README.pdf" "${STAGE_DIR}/README.pdf"
+            cp "${WORKSPACE}/release/README_zh-Hans.md" "${STAGE_DIR}/README_zh-Hans.md"
+            cp "${WORKSPACE}/release/README_zh-Hant.md" "${STAGE_DIR}/README_zh-Hant.md"
+            cp "${WORKSPACE}/release/README_ja.md" "${STAGE_DIR}/README_ja.md"
+            cp "${WORKSPACE}/release/checksums.txt" "${STAGE_DIR}/checksums.txt"
+
+            # Create zip using absolute paths (no cd required)
+            zip -r "${WORKSPACE}/${ZIP_NAME}" -j "${STAGE_DIR}/"
+
+            echo "✅ Created ${ZIP_NAME}"
+            ls -lh "${WORKSPACE}/${ZIP_NAME}"
+          done
+
+          ls -lh "${WORKSPACE}"/radeis_sc2sbom_*.zip
+
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Try to extract from CHANGELOG.md
+          if [ -f "CHANGELOG.md" ]; then
+            # Extract section between [VERSION] and next ## heading
+            # Handles formats like: ## [1.0.5] - 2026-03-03 or ## [1.0.5]
+            # Escape dots in version for regex matching
+            ESCAPED_VERSION=$(echo "$VERSION" | sed 's/\./\\./g')
+            NOTES=$(awk "/## \[${ESCAPED_VERSION}\]/ { found=1; next } found && /^## \[/ { exit } found { print }" CHANGELOG.md)
+
+            if [ -n "$NOTES" ]; then
+              echo "notes<<EOF" >> $GITHUB_OUTPUT
+              echo "$NOTES" >> $GITHUB_OUTPUT
+              echo "" >> $GITHUB_OUTPUT
+              echo "---" >> $GITHUB_OUTPUT
+              echo "" >> $GITHUB_OUTPUT
+              echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+              echo "✅ Extracted release notes from CHANGELOG.md for version ${VERSION}"
+            else
+              echo "notes=Release ${VERSION} - See commit history for details." >> $GITHUB_OUTPUT
+              echo "⚠️  No CHANGELOG.md section found for version ${VERSION}, using default message"
+            fi
+          else
+            echo "notes=Release ${VERSION} - See commit history for details." >> $GITHUB_OUTPUT
+            echo "⚠️  CHANGELOG.md not found, using default message"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN }}
+          RELEASE_NOTES: ${{ steps.release_notes.outputs.notes }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ github.event_name == 'push' && github.ref_name || format('v{0}', steps.version.outputs.version) }}"
+          PRERELEASE="${{ inputs.prerelease || false }}"
+
+          # If release already exists (e.g. from a failed prior run), delete it first.
+          # Do NOT use --cleanup-tag: deleting the tag then re-pushing it would
+          # trigger another workflow run, causing an infinite loop.
+          if gh release view "${TAG}" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release '${TAG}' already exists — deleting for clean re-run."
+            gh release delete "${TAG}" --repo "${{ github.repository }}" --yes
+          fi
+
+          PRERELEASE_FLAG=""
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Write notes via env var to avoid backtick shell-expansion in release body.
+          echo "${RELEASE_NOTES}" > /tmp/release_notes.md
+
+          gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${TAG}" \
+            --notes-file /tmp/release_notes.md \
+            ${PRERELEASE_FLAG} \
+            "radeis_sc2sbom_${VERSION}_linux.zip" \
+            "radeis_sc2sbom_${VERSION}_macos-arm64.zip" \
+            "radeis_sc2sbom_${VERSION}_macos-x86_64.zip" \
+            "radeis_sc2sbom_${VERSION}_windows.zip" \
+            "release/radeis_sc2sbom-macos-arm64" \
+            "release/radeis_sc2sbom-macos-x86_64" \
+            "release/radeis_sc2sbom-linux" \
+            "release/radeis_sc2sbom-windows.exe" \
+            "release/README.pdf" \
+            "release/checksums.txt"

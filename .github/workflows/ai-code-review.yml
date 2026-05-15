@@ -1,0 +1,124 @@
+name: AI Code Review
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  parse-comment:
+    name: Parse Comment Trigger
+    runs-on:
+      group: Default
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/ai-review')
+    outputs:
+      model: ${{ steps.parse.outputs.model }}
+      pr_number: ${{ steps.parse.outputs.pr_number }}
+      inline_prompt: ${{ steps.parse.outputs.inline_prompt }}
+      comment_id: ${{ github.event.comment.id }}
+
+    steps:
+      - name: Parse review command
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          FIRST_LINE=$(echo "$COMMENT_BODY" | head -n1)
+          FIRST_LINE_LOWER=$(printf '%s\n' "$FIRST_LINE" | tr '[:upper:]' '[:lower:]')
+
+          case "$FIRST_LINE_LOWER" in
+            "/ai-review codex"*)
+              MODEL="codex"
+              INLINE_PROMPT=$(echo "$FIRST_LINE" | sed -E 's|^/ai-review[[:space:]]+codex[[:space:]]*||i')
+              ;;
+            "/ai-review claude"*)
+              MODEL="claude"
+              INLINE_PROMPT=$(echo "$FIRST_LINE" | sed -E 's|^/ai-review[[:space:]]+claude[[:space:]]*||i')
+              ;;
+            "/ai-review"*)
+              MODEL="claude"
+              INLINE_PROMPT=$(echo "$FIRST_LINE" | sed -E 's|^/ai-review[[:space:]]*||i')
+              ;;
+            *)
+              MODEL="claude"
+              INLINE_PROMPT=$(echo "$FIRST_LINE" | sed -E 's|^/ai-review[[:space:]]*||i')
+              ;;
+          esac
+
+          INLINE_PROMPT=$(echo "$INLINE_PROMPT" | xargs)
+
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "inline_prompt=$INLINE_PROMPT" >> $GITHUB_OUTPUT
+
+  call-review-comment:
+    name: AI Review (Comment)
+    needs: parse-comment
+    uses: VicOne-RD/.github/.github/workflows/ai-code-review-reusable.yml@master
+    with:
+      pr_number: ${{ needs.parse-comment.outputs.pr_number }}
+      model: ${{ needs.parse-comment.outputs.model }}
+      trigger_type: comment
+      comment_id: ${{ needs.parse-comment.outputs.comment_id }}
+      inline_prompt: ${{ needs.parse-comment.outputs.inline_prompt }}
+    secrets:
+      MATRIX_API_KEY_AI_REVIEWER: ${{ secrets.MATRIX_API_KEY_AI_REVIEWER }}
+
+  parse-label:
+    name: Parse Label Trigger
+    runs-on:
+      group: Default
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      startsWith(github.event.label.name, 'ai-review:')
+    outputs:
+      model: ${{ steps.parse.outputs.model }}
+      pr_number: ${{ steps.parse.outputs.pr_number }}
+      label_name: ${{ steps.parse.outputs.label_name }}
+
+    steps:
+      - name: Parse label
+        id: parse
+        run: |
+          LABEL="${{ github.event.label.name }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          case "$LABEL" in
+            "ai-review:codex")
+              MODEL="codex"
+              ;;
+            "ai-review:claude")
+              MODEL="claude"
+              ;;
+            *)
+              echo "Error: Unrecognized ai-review label '$LABEL'. Supported labels are 'ai-review:claude' and 'ai-review:codex'." >&2
+              exit 1
+              ;;
+          esac
+
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "label_name=$LABEL" >> $GITHUB_OUTPUT
+
+  call-review-label:
+    name: AI Review (Label)
+    needs: parse-label
+    uses: VicOne-RD/.github/.github/workflows/ai-code-review-reusable.yml@master
+    with:
+      pr_number: ${{ needs.parse-label.outputs.pr_number }}
+      model: ${{ needs.parse-label.outputs.model }}
+      trigger_type: label
+      label_name: ${{ needs.parse-label.outputs.label_name }}
+    secrets:
+      MATRIX_API_KEY_AI_REVIEWER: ${{ secrets.MATRIX_API_KEY_AI_REVIEWER }}

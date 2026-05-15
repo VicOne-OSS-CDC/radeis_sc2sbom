@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.14)
+project(test_project)
+
+include(FetchContent)
+
+# Test FetchContent_Declare with Git repository
+FetchContent_Declare(
+  json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.2
+)
+
+# Test FetchContent_Declare with URL and hash
+FetchContent_Declare(
+  fmt
+  URL https://github.com/fmtlib/fmt/releases/download/9.1.0/fmt-9.1.0.zip
+  URL_HASH SHA256=5dea48d1fcddc3ec571ce2058e13910a0d4a6bab4cc09a809d8b1dd1c88ae6f2
+)
+
+# Test FetchContent_Declare with GitLab
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://gitlab.com/gabime/spdlog.git
+  GIT_TAG        v1.11.0
+)
+
+FetchContent_MakeAvailable(json fmt spdlog)

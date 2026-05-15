@@ -1,0 +1,18 @@
+{
+  "version": "0.5",
+  "requires": [
+    "zlib/1.2.13#416618fa04d433c6bd94279ed2e93638%1680515805.054666",
+    "openssl/3.1.2#e89b2a7f1bc1bc3c79cacd6ec5da14c3%1695118636.901023",
+    "boost/1.82.0#c3b1d8e4f7e8d9f0a1b2c3d4e5f6a7b8%1698765432.123456"
+  ],
+  "build_requires": [
+    "cmake/3.27.0#abc123def456ghi789jkl012mno345pq%1680000000.000000"
+  ],
+  "tool_requires": [
+    "ninja/1.11.1#def456abc789ghi012jkl345mno678pq%1685000000.000000"
+  ],
+  "test_requires": [
+    "gtest/1.14.0#ghi789def012abc345jkl678mno901pq%1690000000.000000"
+  ],
+  "python_requires": []
+}

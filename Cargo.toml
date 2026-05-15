@@ -1,0 +1,45 @@
+[package]
+name = "radeis_sc2sbom"
+version = "1.0.18"
+edition = "2021"
+authors = ["Amean Lin", "William Chang"]
+description = "A CLI tool that scans source code directories and generates Software Bill of Materials (SBOM) in multiple formats including SPDX 2.3 and CycloneDX 1.5"
+license = "MIT"
+repository = "https://github.com/VicOne-RD/radeis_sc2sbom"
+keywords = ["sbom", "spdx", "cyclonedx", "security", "supply-chain"]
+categories = ["command-line-utilities", "development-tools"]
+
+[features]
+# CN regional release: appends vulnerability assessment service info to --help output
+cn-release = []
+# Internal builds: enables CVE scanning (OSV), CWE enrichment (NVD), lexical CWE scanner
+internal = ["dep:reqwest", "dep:tree-sitter", "dep:tree-sitter-c"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+walkdir = "2.5"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+chrono = "0.4"
+regex = "1.10"
+quick-xml = "0.30"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+reqwest = { version = "0.11", optional = true, features = ["blocking", "json", "native-tls-vendored"] }
+rayon = "1.8"
+sha2 = "0.10"
+semver = "1.0"
+serde_yaml = "0.9"
+lazy_static = "1.4"
+indicatif = "0.17"
+tempfile = "3.15"
+glob = "0.3"
+# tree-sitter and tree-sitter-c are MIT-licensed (verified against tree-sitter-c 0.24.2 crate metadata, 2026-05-11); musl-compatible static linking via the crate's built-in build.rs.
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+
+[dev-dependencies]
+tempfile = "3.15"
+assert_cmd = "2"
+predicates = "3"

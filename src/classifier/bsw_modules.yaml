@@ -1,0 +1,127 @@
+# AUTOSAR R22-11 Basic Software module list
+# Schema: ModuleName: { layer: <value>, platform: <Classic|Adaptive> }
+# Loaded by src/classifier/autosar.rs via include_str! at compile time.
+# Override at runtime via --bsw-config <path>.
+
+# Memory stack
+NvM:
+  layer: BSW-Memory
+  platform: Classic
+MemIf:
+  layer: BSW-Memory
+  platform: Classic
+MemAcc:
+  layer: BSW-Memory
+  platform: Classic
+Fee:
+  layer: BSW-Memory
+  platform: Classic
+Ea:
+  layer: BSW-Memory
+  platform: Classic
+
+# Communication stack
+Com:
+  layer: BSW-Communication
+  platform: Classic
+PduR:
+  layer: BSW-Communication
+  platform: Classic
+CanIf:
+  layer: BSW-Communication
+  platform: Classic
+CanSM:
+  layer: BSW-Communication
+  platform: Classic
+CanNm:
+  layer: BSW-Communication
+  platform: Classic
+CanTp:
+  layer: BSW-Communication
+  platform: Classic
+LinIf:
+  layer: BSW-Communication
+  platform: Classic
+LinSM:
+  layer: BSW-Communication
+  platform: Classic
+FrIf:
+  layer: BSW-Communication
+  platform: Classic
+SoAd:
+  layer: BSW-Communication
+  platform: Classic
+TcpIp:
+  layer: BSW-Communication
+  platform: Classic
+
+# System services
+Dcm:
+  layer: BSW-Services
+  platform: Classic
+Dem:
+  layer: BSW-Services
+  platform: Classic
+Det:
+  layer: BSW-Services
+  platform: Classic
+EcuM:
+  layer: BSW-Services
+  platform: Classic
+BswM:
+  layer: BSW-Services
+  platform: Classic
+
+# MCAL
+Wdg:
+  layer: MCAL
+  platform: Classic
+WdgIf:
+  layer: MCAL
+  platform: Classic
+Gpt:
+  layer: MCAL
+  platform: Classic
+Mcu:
+  layer: MCAL
+  platform: Classic
+Port:
+  layer: MCAL
+  platform: Classic
+Dio:
+  layer: MCAL
+  platform: Classic
+Icu:
+  layer: MCAL
+  platform: Classic
+Pwm:
+  layer: MCAL
+  platform: Classic
+Adc:
+  layer: MCAL
+  platform: Classic
+Spi:
+  layer: MCAL
+  platform: Classic
+Can:
+  layer: MCAL
+  platform: Classic
+
+# OS + RTE
+Os:
+  layer: OS
+  platform: Classic
+Rte:
+  layer: RTE
+  platform: Classic
+
+# Adaptive AUTOSAR (ara::* exposed as ara_* in scanned build files; underscore form per A2 in 07-RESEARCH.md)
+ara_com:
+  layer: BSW-Communication
+  platform: Adaptive
+ara_exec:
+  layer: BSW-Services
+  platform: Adaptive
+ara_log:
+  layer: BSW-Services
+  platform: Adaptive

@@ -1,0 +1,47 @@
+flowchart TD
+  A[Start] --> B[Parse CLI args: path, format]
+  B --> C{Valid path?}
+  C -- No --> Z[Error and exit]
+  C -- Yes --> D[Walk directory recursively]
+
+  D --> E{Match filename}
+  E -->|package.json| F1[parse_package_json - npm]
+  E -->|Cargo.toml| F2[parse_cargo_toml - cargo]
+  E -->|requirements.txt| F3[parse_requirements_txt - pip]
+  E -->|go.mod| F4[parse_go_mod - go]
+  E -->|Gemfile| F5[parse_gemfile - rubygems]
+  E -->|composer.json| F6[parse_composer_json - composer]
+  E -->|pom.xml| F7[detection only - maven]
+  E -->|build.gradle or kts| F8[detection only - gradle]
+  E -->|package-lock.json| F9[parse_package_lock_json - npm lock]
+  E -->|yarn.lock| F10[parse_yarn_lock - npm/yarn lock]
+  E -->|Cargo.lock| F11[parse_cargo_lock - cargo lock]
+  E -->|poetry.lock| F12[parse_poetry_lock - python lock]
+
+  F1 --> H[Accumulate dependencies]
+  F2 --> H
+  F3 --> H
+  F4 --> H
+  F5 --> H
+  F6 --> H
+  F7 --> H
+  F8 --> H
+  F9 --> H
+  F10 --> H
+  F11 --> H
+  F12 --> H
+
+  H --> I[Deduplicate dependencies]
+  I --> J[Build SBOM]
+  J --> K{Output format}
+  K -->|console| L[print_sbom]
+  K -->|spdx-json| M1[convert_to_spdx]
+  M1 --> M2[create purl refs]
+  M2 --> M3[print_spdx_json]
+  K -->|spdx-tag-value| N1[convert_to_spdx]
+  N1 --> N2[create purl refs]
+  N2 --> N3[print_spdx_tag_value]
+
+  L --> O[Done]
+  M3 --> O
+  N3 --> O

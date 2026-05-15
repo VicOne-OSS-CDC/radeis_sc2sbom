@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.14)
+project(test_project)
+
+include(FetchContent)
+
+# Set variables
+set(FMT_VERSION "9.1.0")
+set(JSON_VERSION "v3.11.2")
+
+# These should be skipped because they contain CMake variables
+FetchContent_Declare(
+  fmt_with_var
+  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  GIT_TAG        ${FMT_VERSION}
+)
+
+FetchContent_Declare(
+  json_with_var
+  GIT_REPOSITORY ${GITHUB_URL}/nlohmann/json.git
+  GIT_TAG        v3.11.2
+)
+
+# This should work (no variables)
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog.git
+  GIT_TAG        v1.11.0
+)
