@@ -6,7 +6,7 @@
 
 # radeis_sc2sbom
 
-**高速 SBOM ジェネレーター、脆弱性検出機能内蔵。** マルチエコシステム対応に加え、独自の機能を備えています：C/C++ Autotools、ROS 2、Git サブモジュール、CMake ExternalProject、AUTOSAR BSW をサポートする**唯一のツール**です。
+**高速 SBOM ジェネレーター。** マルチエコシステム対応に加え、独自の機能を備えています：C/C++ Autotools、ROS 2、Git サブモジュール、CMake ExternalProject、AUTOSAR BSW をサポートする**唯一のツール**です。
 
 ## VicOne xZETA で SBOM の価値を最大化
 

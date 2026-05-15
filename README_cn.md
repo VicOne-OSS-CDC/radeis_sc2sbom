@@ -6,7 +6,7 @@
 
 # radeis_sc2sbom
 
-**快速 SBOM 生成器，内置漏洞检测。** 多生态系统支持，具备独特能力：**唯一**支持 C/C++ Autotools、ROS 2、Git 子模块、CMake ExternalProject 和 AUTOSAR BSW 的工具。
+**快速 SBOM 生成器。** 多生态系统支持，具备独特能力：**唯一**支持 C/C++ Autotools、ROS 2、Git 子模块、CMake ExternalProject 和 AUTOSAR BSW 的工具。
 
 ## 借助 VicOne xZETA 充分发挥 SBOM 的价值
 
